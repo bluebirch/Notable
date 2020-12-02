@@ -1,4 +1,14 @@
-# notable_cli
+# Notable.pm and notable_cli
+
+This is a simple Perl module and command line interface to access and manipulate [Notable](https://notable.app) markdown notes.
+
+Currently, it barely works, but please add requests on what kind of functionality you would like to find in a tool like this. I want it to be able to do things like:
+
+- Listing notes based on title, notebooks, tags or any combination of them.
+- Find orphaned attachments.
+- Find broken links to renamed or non-existing attachments.
+- Automatically add inline links to attached images.
+- Print notes using [Pandoc](https://pandoc.org).
 
 ## Usage
 
@@ -10,9 +20,7 @@ List all notes:
 notable_cli ls
 ```
 
-List all notes containing `regexp` in title:[^1]
-
-[^1]: Or file name?
+List all notes containing `regexp` in title:
 
 ```sh
 notable_cli ls title
@@ -36,16 +44,3 @@ List all notes in particular notebook with tags and containing certain string i 
 notable_cli ls --notebook=Notebook --tag=tag1 title
 ```
 
-### Attachments
-
-```sh
-notable_cli attachment list [title]
-```
-
-```sh
-notable_cli attachment lost
-```
-
-```sh
-notable_cli attachment orphaned
-```
