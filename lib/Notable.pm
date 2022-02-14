@@ -12,13 +12,11 @@ Notable - access the Notable database.
 
 =cut
 
-use strict;
-use warnings;
+use Modern::Perl;
 use utf8;
 use locale;
-use open qw(:encoding(UTF-8) :std);
+use open qw(:encoding(UTF-8));
 use Notable::Note;
-use Data::Dumper;
 use Carp;
 
 =head1 FUNCTIONS
@@ -40,12 +38,18 @@ sub new {
         $data_dir = shift @options;
     }
 
+    say "datadir=$data_dir";
+
     # Bless object
-    my $self = bless { opt => {} }, $class;
+    my $self = bless {}, $class;
 
     # Verify data directory and get list of files
-    if ( $self->_verify_data_dir($data_dir) ) {
+    say "verify data directory";
+    if ( $self->set_data_directory($data_dir) ) {
         $self->_fetch_list_of_files;
+    }
+    else {
+        die $self->{error};
     }
 
     return $self;
@@ -73,65 +77,88 @@ sub error {
     return $self->{error} ? $self->{error} : "";
 }
 
-# Verify the Notable data directory.
-sub _verify_data_dir {
+=head2 set_data_directory( $dir )
+
+Set Notable data directory. Returns true if this is a valid Notable data
+directory.
+
+=cut
+
+sub set_data_directory {
     my $self = shift;
     if (@_) {
-        $self->{opt}->{base_dir} = shift;
-        $self->{opt}->{base_dir} .= '/' unless ( $self->{opt}->{base_dir} =~ m:/$: );
-        $self->{opt}->{notes_dir}       = $self->{opt}->{base_dir} . 'notes/';
-        $self->{opt}->{attachments_dir} = $self->{opt}->{base_dir} . 'attachments/';
+        $self->{base_dir} = File::Spec->rel2abs( File::Spec->canonpath( shift ) );
+        $self->{notes_dir} = File::Spec->catdir( $self->{base_dir}, 'notes' );
+        $self->{attachments_dir} = File::Spec->catdir( $self->{base_dir}, 'attachments' );
     }
-    if ( -d $self->{opt}->{base_dir} && -d $self->{opt}->{notes_dir} ) {
+    if ( -d $self->{base_dir} && -d $self->{notes_dir} ) {
         $self->{ok} = 1;
     }
     else {
         $self->{ok}    = undef;
-        $self->{error} = "Invalid data directory $self->{opt}->{base_dir}.";
+        $self->{error} = "Invalid data directory $self->{base_dir}.";
     }
     return $self->{ok};
 }
 
 sub _fetch_list_of_files {
     my $self = shift;
-    opendir my $dir, $self->{opt}->{notes_dir} or die;    # TODO: error handling
-    $self->{filelist} = [ grep {m/\.md$/i} map { Encode::decode_utf8($_) } readdir $dir ];
-
-    #print STDERR Dumper $self->{filelist};
-    #confess;
+    opendir my $dir, $self->{notes_dir} or die;    # TODO: error handling
+    $self->{filelist} = [ grep {m/\.md$/i}  readdir $dir ];
     closedir $dir;
 }
 
-=head2 get_note( $name )
+=head2 open( $name )
 
 Get note based on file name. Returns a L<Notable::Note> object on success.
 
 =cut
 
-sub get_note {
+sub open_note {
     my ( $self, $file ) = @_;
+    #say "OPEN_NOTE $file";
     if ( !exists $self->{note}->{$file} ) {
-        $self->{note}->{$file} = Notable::Note->new( $file, $self->{opt} );
+        $self->{note}->{$file} = Notable::Note->open( file => $file, dir => $self->{notes_dir} );
     }
     return $self->{note}->{$file};
 }
 
-=head2 get_note_title( $title )
+=head1 add_note( title => $title )
 
-Get note based on title.
-
-TODO: What about notes with duplicate titles?
+Add a new note to the Notable database.
 
 =cut
 
-sub get_note_title {
-    my ( $self, $title ) = @_;
+sub add_note {
+    my $self = shift;
 
-    # build title index if needed
-    $self->_build_title_index unless ( $self->{titles} );
+    # Create new note, just pass on parameters.
+    my $note = Notable::Note->new( dir => $self->{notes_dir}, @_ );
 
-    return $self->{titles}->{$title};
+    # If that worked, store the newly created note in the cache and return it.
+    if ($note) {
+        $self->{note}->{$note->file} = $note;
+        return $note;
+    }
+    return undef;
 }
+
+# =head2 get_note_title( $title )
+
+# Get note based on title.
+
+# TODO: What about notes with duplicate titles?
+
+# =cut
+
+# sub get_note_title {
+#     my ( $self, $title ) = @_;
+
+#     # build title index if needed
+#     $self->_build_title_index unless ( $self->{titles} );
+
+#     return $self->{titles}->{$title};
+# }
 
 # sub _build_list_of_notebooks {
 #     my $self = shift;
@@ -150,7 +177,7 @@ sub get_note_title {
 #     if ( !exists $self->{titles} ) {
 #         foreach my $file ( @{ $self->{filelist} } ) {
 #             my $note = $self->get_note($file);
-#             $self->{titles}->{ $note->title } = $note;    # TODO: check for duplicates
+#             $self->{titles}->{ $note->title } = $note;    # TODO:-20 check for duplicates
 #         }
 #     }
 # }
@@ -172,7 +199,6 @@ sub select {
     if ( $search{notebook} ) {
         my @notebooks = ref( $search{notebook} ) ? @{ $search{notebook} } : ( $search{notebook} );
         foreach my $notebook (@notebooks) {
-            print STDERR "searching notebook $notebook\n";
             $list = $self->select_notebook( $notebook, $list );
         }
     }
@@ -207,9 +233,11 @@ sub select_all {
     my $self = shift;
     if ( !exists $self->{notes} ) {
         $self->{notes} = [];
-        @{ $self->{notes} } = grep {$_} map { $self->get_note($_) } @{ $self->{filelist} };  # TODO: this can silently ignore errors
+        @{ $self->{notes} } = grep {$_} map { $self->open_note($_) } @{ $self->{filelist} };  # TODO: this can silently ignore errors
     }
-    return wantarray ? @{ $self->{notes} } : $self->{notes};
+    my $all = [];
+    @$all = @{ $self->{notes} };
+    return wantarray ? @$all : $all;
 }
 
 =head2 select_tag( $tag[, $list])
@@ -249,14 +277,29 @@ Selecet notes with $regexp in title.
 =cut
 
 sub select_title {
-    my ( $self, $regexp, $list ) = @_;
+    my ( $self, $regex, $list ) = @_;
     $list = $self->select_all() unless ($list);
-    if ($regexp) {
-        my $re = qr/$regexp/i;
-        @$list = grep { $_->{props}->{title} =~ m/$re/ } @$list;
+    if ($regex) {
+        @$list = grep { $_->has('title') && $_->{meta}->{title} =~ m/$regex/ } @$list;
     }
     return wantarray ? @$list : $list;
 }
+
+=head2 select_meta( $key, $value[, $list] )
+
+Select notes with metadata $key set to $regex.
+
+=cut
+
+sub select_meta {
+    my ( $self, $key, $value, $list ) = @_;
+    $list = $self->select_all() unless ($list);
+    if ($value) {
+        @$list = grep { $_->has($key) && $_->{meta}->{$key} eq $value } @$list;
+    }
+    return wantarray ? @$list : $list;
+}
+
 
 =head2 attachments()
 
@@ -267,13 +310,11 @@ Return a list of attachments.
 sub attachments {
     my $self = shift;
     $self->_fetch_list_of_attachments unless ( $self->{attachmentlist} );
-    print Dumper $self->{attachmentlist};
     return wantarray ? @{ $self->{attachmentlist} } : $self->{attachmentlist};
 }
 
 sub _fetch_list_of_attachments {
     my $self = shift;
-    print STDERR "opendir $self->{opt}->{attachments_dir}\n";
     opendir my $dir, $self->{opt}->{attachments_dir} or die;    # TODO: error handling
     $self->{attachmentlist} = [ map { Encode::decode_utf8($_) } readdir $dir ];
     closedir $dir;
