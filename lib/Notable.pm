@@ -38,13 +38,10 @@ sub new {
         $data_dir = shift @options;
     }
 
-    say "datadir=$data_dir";
-
     # Bless object
     my $self = bless {}, $class;
 
     # Verify data directory and get list of files
-    say "verify data directory";
     if ( $self->set_data_directory($data_dir) ) {
         $self->_fetch_list_of_files;
     }

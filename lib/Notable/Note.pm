@@ -363,6 +363,21 @@ sub add_tags {
     }
 }
 
+=head2 remove_tags( @tags )
+
+Remove tags from note.
+
+=cut
+
+sub remove_tags {
+    my $self = shift;
+    foreach my $tag (@_) {
+        next unless $tag;
+        @{ $self->{meta}->{tags} } = grep { !m/^\Q$tag\E$/ } @{ $self->{meta}->{tags} };
+    }
+}
+
+
 =head2 notebooks()
 
 Returns which notebooks (if any) the note belongs to.
@@ -442,7 +457,7 @@ Return list of attachments.
 
 sub attachments {
     my $self        = shift;
-    my $attachments = $self->property('attachments');
+    my $attachments = $self->meta('attachments');
     $attachments = [] unless ($attachments);
     return wantarray ? @$attachments : $attachments;
 }
