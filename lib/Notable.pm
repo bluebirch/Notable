@@ -84,8 +84,8 @@ directory.
 sub set_data_directory {
     my $self = shift;
     if (@_) {
-        $self->{base_dir} = File::Spec->rel2abs( File::Spec->canonpath( shift ) );
-        $self->{notes_dir} = File::Spec->catdir( $self->{base_dir}, 'notes' );
+        $self->{base_dir}        = File::Spec->rel2abs( File::Spec->canonpath(shift) );
+        $self->{notes_dir}       = File::Spec->catdir( $self->{base_dir}, 'notes' );
         $self->{attachments_dir} = File::Spec->catdir( $self->{base_dir}, 'attachments' );
     }
     if ( -d $self->{base_dir} && -d $self->{notes_dir} ) {
@@ -101,7 +101,7 @@ sub set_data_directory {
 sub _fetch_list_of_files {
     my $self = shift;
     opendir my $dir, $self->{notes_dir} or die;    # TODO: error handling
-    $self->{filelist} = [ grep {m/\.md$/i}  readdir $dir ];
+    $self->{filelist} = [ grep {m/\.md$/i} readdir $dir ];
     closedir $dir;
 }
 
@@ -113,6 +113,7 @@ Get note based on file name. Returns a L<Notable::Note> object on success.
 
 sub open_note {
     my ( $self, $file ) = @_;
+
     #say "OPEN_NOTE $file";
     if ( !exists $self->{note}->{$file} ) {
         $self->{note}->{$file} = Notable::Note->open( file => $file, dir => $self->{notes_dir} );
@@ -134,7 +135,7 @@ sub add_note {
 
     # If that worked, store the newly created note in the cache and return it.
     if ($note) {
-        $self->{note}->{$note->file} = $note;
+        $self->{note}->{ $note->file } = $note;
         return $note;
     }
     return undef;
@@ -230,7 +231,7 @@ sub select_all {
     my $self = shift;
     if ( !exists $self->{notes} ) {
         $self->{notes} = [];
-        @{ $self->{notes} } = grep {$_} map { $self->open_note($_) } @{ $self->{filelist} };  # TODO: this can silently ignore errors
+        @{ $self->{notes} } = grep {$_} map { $self->open_note($_) } @{ $self->{filelist} }; # TODO: this can silently ignore errors
     }
     my $all = [];
     @$all = @{ $self->{notes} };
@@ -292,11 +293,18 @@ sub select_meta {
     my ( $self, $key, $value, $list ) = @_;
     $list = $self->select_all() unless ($list);
     if ($value) {
-        @$list = grep { $_->has($key) && $_->{meta}->{$key} eq $value } @$list;
+
+        # a "::" denotes a hierarchial key, like key::subkey
+        if ( $key =~ m/::/ ) {
+            ( $key, my $subkey ) = split m/::/, $key, 2;
+            @$list = grep { $_->{meta}->{$key} && $_->{meta}->{$key}->{$subkey} && $_->{meta}->{$key}->{$subkey} eq $value } @$list;
+        }
+        else {
+            @$list = grep { $_->{meta}->{$key} && $_->{meta}->{$key} eq $value } @$list;
+        }
     }
     return wantarray ? @$list : $list;
 }
-
 
 =head2 attachments()
 

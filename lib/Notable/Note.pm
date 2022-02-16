@@ -291,6 +291,31 @@ sub meta {
     return $self->{meta}->{$key};
 }
 
+=head2 delete_meta( $key )
+
+Delete metadata key.
+
+=cut
+
+sub delete_meta {
+    my $self = shift;
+    my $key  = shift;
+
+    return undef unless ($key);
+
+    # if metadata is not yet read from file, do it!
+    if ( !$self->{meta} && -f $self->{path} ) {
+        $self->read( header_only => 1 );
+    }
+
+    if (defined $self->{meta}->{$key}) {
+        delete $self->{meta}->{$key};
+        return 1;
+    }
+
+    return undef;
+}
+
 =head1 has( $key )
 
 Returns true if $key exists in the note metadata.
