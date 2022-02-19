@@ -17,7 +17,13 @@ use utf8;
 use locale;
 use open qw(:encoding(UTF-8));
 use Notable::Note;
-use Carp;
+use Carp qw(carp);
+use Storable;
+
+#use DateTime::Format::ISO8601;
+use File::stat;
+
+our $DEBUG = 0;
 
 =head1 FUNCTIONS
 
@@ -30,7 +36,7 @@ Create a new instance with C<$data_dir> pointing to the Notable data directory.
 sub new {
     my ( $class, @options ) = @_;
 
-    my $data_dir = $ENV{HOME} . '.notable';    # default path
+    my $data_dir;
 
     # If there is an odd number of options, assume the first is the path to
     # the Notable data directory.
@@ -41,16 +47,16 @@ sub new {
     # Bless object
     my $self = bless {}, $class;
 
-    # Verify data directory and get list of files
-    if ( $self->set_data_directory($data_dir) ) {
-        $self->_fetch_list_of_files;
-    }
-    else {
-        die $self->{error};
-    }
+    $self->open_dir($data_dir) if ($data_dir);
 
     return $self;
 }
+
+# sub DESTROY {
+#     my $self = shift;
+#     say STDERR "DESTROY!!";
+#     $self->save_cache;
+# }
 
 =head2 ok()
 
@@ -74,21 +80,58 @@ sub error {
     return $self->{error} ? $self->{error} : "";
 }
 
-=head2 set_data_directory( $dir )
+=head2 open_dir( $dir )
 
 Set Notable data directory. Returns true if this is a valid Notable data
 directory.
 
 =cut
 
-sub set_data_directory {
+sub open_dir {
     my $self = shift;
     if (@_) {
         $self->{base_dir}        = File::Spec->rel2abs( File::Spec->canonpath(shift) );
         $self->{notes_dir}       = File::Spec->catdir( $self->{base_dir}, 'notes' );
         $self->{attachments_dir} = File::Spec->catdir( $self->{base_dir}, 'attachments' );
+        $self->{config_dir}      = File::Spec->catdir( $self->{base_dir}, '.notable' );
+        $self->{cachefile}       = File::Spec->catfile( $self->{config_dir}, "cache.storable" );
+
     }
     if ( -d $self->{base_dir} && -d $self->{notes_dir} ) {
+
+        # If I'm going to do caching seriously, I need to diff arrays and stuff. See here:
+        # https://stackoverflow.com/questions/2933347/difference-of-two-arrays-using-perl
+
+        # Get a list of files with their corresponding mtime
+        $self->stat_files;
+        $self->read_cache;
+
+        # Determine new and deleted files compared to cache
+        my @new_files     = grep { !$self->{cache}->{$_} } keys %{ $self->{files} };
+        my @deleted_files = grep { !$self->{files}->{$_} } keys %{ $self->{cache} };
+
+        # Remove deleted files from cache
+        foreach my $file (@deleted_files) {
+            carp "cache: remove deleted file '$file'" if ($DEBUG);
+            delete $self->{cache}->{$file};
+        }
+
+        # Check if any cached files need updating
+        foreach my $file ( keys %{ $self->{cache} } ) {
+            if ( !$self->{cache}->{$file}->{mtime} || $self->{cache}->{$file}->{mtime} != $self->{files}->{$file} ) {
+                carp "cache: refresh changed file '$file'" if ($DEBUG);
+                $self->{cache}->{$file}->read('header');
+                $self->{cache}->{$file}->{mtime} = $self->{files}->{$file};
+            }
+        }
+
+        # Open new files
+        foreach my $file (@new_files) {
+            carp "cache: add new file '$file'" if ($DEBUG);
+            $self->open_note($file);
+            $self->{cache}->{$file}->{mtime} = $self->{files}->{$file};
+        }
+
         $self->{ok} = 1;
     }
     else {
@@ -98,14 +141,20 @@ sub set_data_directory {
     return $self->{ok};
 }
 
-sub _fetch_list_of_files {
+sub close_dir {
     my $self = shift;
-    opendir my $dir, $self->{notes_dir} or die;    # TODO: error handling
-    $self->{filelist} = [ grep {m/\.md$/i} readdir $dir ];
-    closedir $dir;
+    $self->save_cache;
 }
 
-=head2 open( $name )
+sub stat_files {
+    my $self = shift;
+    opendir my $dir, $self->{notes_dir} or die;    # TODO: error handling
+    %{ $self->{files} } = map { $_ => stat( File::Spec->catfile( $self->{notes_dir}, $_ ) )->mtime } grep {m/\.md$/i} readdir $dir;
+    closedir $dir;
+    return $self->{files};
+}
+
+=head2 open_note( $name )
 
 Get note based on file name. Returns a L<Notable::Note> object on success.
 
@@ -114,11 +163,11 @@ Get note based on file name. Returns a L<Notable::Note> object on success.
 sub open_note {
     my ( $self, $file ) = @_;
 
-    #say "OPEN_NOTE $file";
-    if ( !exists $self->{note}->{$file} ) {
-        $self->{note}->{$file} = Notable::Note->open( file => $file, dir => $self->{notes_dir} );
+    if ( !exists $self->{cache}->{$file} ) {
+        carp "open_note( '$file' )" if $DEBUG;
+        $self->{cache}->{$file} = Notable::Note->open( file => $file, dir => $self->{notes_dir} );
     }
-    return $self->{note}->{$file};
+    return $self->{cache}->{$file};
 }
 
 =head1 add_note( title => $title )
@@ -135,7 +184,7 @@ sub add_note {
 
     # If that worked, store the newly created note in the cache and return it.
     if ($note) {
-        $self->{note}->{ $note->file } = $note;
+        $self->{cache}->{ $note->file } = $note;
         return $note;
     }
     return undef;
@@ -229,12 +278,20 @@ Return a list of all notes.
 
 sub select_all {
     my $self = shift;
-    if ( !exists $self->{notes} ) {
-        $self->{notes} = [];
-        @{ $self->{notes} } = grep {$_} map { $self->open_note($_) } @{ $self->{filelist} }; # TODO: this can silently ignore errors
-    }
+
+    # if ( !exists $self->{notes} ) {
+    #     $self->{notes} = [];
+    #     @{ $self->{notes} } = grep {$_} map { $self->open_note($_) } @{ $self->{filelist} }; # TODO: this can silently ignore errors
+    # }
+    #print Data::Dumper->Dump( [$self->{notes}], [qw(notes)]);
+    # something goes wrong here and I don't know why
     my $all = [];
-    @$all = @{ $self->{notes} };
+    @$all = grep { !$_->meta('deleted') } map { $self->{cache}->{$_} } sort keys %{ $self->{cache} };
+
+    # foreach my $note (@$all) {
+    #     say STDERR "$note->{file}";
+    # }
+    # say "ABOVE IS FROM select_all() - notes: ", scalar @$all;
     return wantarray ? @$all : $all;
 }
 
@@ -278,7 +335,8 @@ sub select_title {
     my ( $self, $regex, $list ) = @_;
     $list = $self->select_all() unless ($list);
     if ($regex) {
-        @$list = grep { $_->has('title') && $_->{meta}->{title} =~ m/$regex/ } @$list;
+        carp "select_title: regex=$regex" if ($DEBUG);
+        @$list = grep { $_->has('title') && $_->{meta}->{title} =~ m/$regex/i } @$list;
     }
     return wantarray ? @$list : $list;
 }
@@ -294,15 +352,34 @@ sub select_meta {
     $list = $self->select_all() unless ($list);
     if ($value) {
 
-        # a "::" denotes a hierarchial key, like key::subkey
-        if ( $key =~ m/::/ ) {
-            ( $key, my $subkey ) = split m/::/, $key, 2;
-            @$list = grep { $_->{meta}->{$key} && $_->{meta}->{$key}->{$subkey} && $_->{meta}->{$key}->{$subkey} eq $value } @$list;
+        # # a "::" denotes a hierarchial key, like key::subkey
+        if ( $key =~ m/->/ ) {
+            my ( $mainkey, $subkey ) = split m/->/, $key, 2;
+
+            #print STDERR Data::Dumper->Dump( [ $key, $subkey ], [qw(key subkey)] );
+            #say "$_: $_->{path} has $key: ", $_->has($key) foreach (@$list);
+            local $_;
+            @$list = grep {
+                       $_->has($key)
+                    && $_->{meta}->{$mainkey}
+                    && $_->{meta}->{$mainkey}->{$subkey}
+                    && $_->{meta}->{$mainkey}->{$subkey} eq $value
+            } @$list;
+
+            #print STDERR Data::Dumper->Dump( [ $list ], [qw(list)] );
         }
         else {
-            @$list = grep { $_->{meta}->{$key} && $_->{meta}->{$key} eq $value } @$list;
+            local ($_);
+            @$list = grep { $_->has($key) && $_->{meta}->{$key} eq $value } @$list;
+
         }
     }
+
+    # foreach my $note (@$list) {
+    #     say STDERR "$note->{file}";
+    # }
+    # say "ABOVE IS FROM select_meta() - notes: ", scalar @$list;
+    # die;
     return wantarray ? @$list : $list;
 }
 
@@ -339,6 +416,45 @@ sub linked_attachments {
         }
     }
     return $self->{attachments};
+}
+
+sub save_cache {
+    my $self = shift;
+
+    # we don't want to cache content, only metadata
+    foreach my $note ( values %{ $self->{cache} } ) {
+        delete $note->{content};
+    }
+    carp "cache: write '$self->{cachefile}'" if ($DEBUG);
+    store( $self->{cache}, $self->{cachefile} );
+}
+
+sub read_cache {
+    my $self = shift;
+    carp "cache: read '$self->{cachefile}'" if ($DEBUG);
+    $self->{cache} = retrieve( $self->{cachefile} ) if ( -f $self->{cachefile} );
+
+    # foreach my $note (values %{$self->{cache}}) {
+    #     say STDERR "READ CACHED ", $note->title;
+    # }
+}
+
+# sub update_metadata {
+#     my $self = shift;
+#     my $fmt  = DateTime::Format::Strptime->new( pattern => '%FT%T%z', on_error => 'croak' );
+#     foreach my $file ( @{ $self->{filelist} } ) {
+#         say STDERR "CHECKING FILE $file";
+#         if ( my $note = $self->{note}->{$file} ) {
+#             $note->verify_metadata;
+#         }
+#     }
+#     die;
+# }
+
+sub yamlpp {
+    my $self = shift;
+    $self->{yamlpp} = YAML::PP->new( footer => 1 ) unless ( $self->{yamlpp} );
+    return $self->{yamlpp};
 }
 
 1;

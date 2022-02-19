@@ -14,7 +14,7 @@ Notable::Note - object oriented interface to a Notable markdown note.
 =cut
 
 use Modern::Perl;
-use Carp;
+use Carp;    # qw(cluck);
 use utf8;
 use locale;
 use open qw(:encoding(UTF-8));
@@ -24,6 +24,8 @@ use YAML::PP qw(Load Dump);
 use File::stat;
 use File::Spec;
 use DateTime;
+
+#use DateTime::Format::ISO8601;
 
 =head2 new( title => $title, file => $file, dir => $dir )
 
@@ -112,22 +114,31 @@ sub open {
     # create object
     my $self = bless { file => $opt{file}, dir => $opt{dir}, path => $opt{path} }, $class;
 
+    # check file mtime
+    #$self->{mtime} = stat($self-{path})->mtime;
+
     # read header
-    $self->read( header_only => 1 );
+    #$self->read( header_only => 1 );
 
     return $self;
 }
 
-=head2 read()
+=head2 read( $what )
 
-Read note. Returns true on success. Add option `skip_contents => 1` if you
-want to skip contents and only read header.
+Read note. Returns true on success. C<$what> is 'header', 'content' or 'both'.
+Defaults to 'both'.
 
 =cut
 
 sub read {
-    my $self = shift;
-    my %opt  = @_;
+    my ( $self, $what ) = @_;
+
+    if ( !$what ) {
+        $what = 'both';
+    }
+    elsif ( $what !~ m/^(?:both|header|content)$/ ) {
+        confess "Must specify 'header', 'content' or 'both' ";
+    }
 
     # open file
     my $fh = IO::File->new( $self->{path}, "r" ) || die "File open fail";
@@ -139,40 +150,42 @@ sub read {
         $self->{content} = $header;
     }
     else {
-        while (<$fh>) {
-            if (m/^(?:---|\.\.\.)/) {    # end of header
-                                         # This marks the end of the YAML front matter block.
-                                         # Remove the empty line that follows that block.
+        while ( my $line = <$fh> ) {
+            if ( $line =~ m/^(?:---|\.\.\.)/ ) {    # end of header
+                                                    # This marks the end of the YAML front matter block.
+                                                    # Remove the empty line that follows that block.
                 my $possible_newline = <$fh>;
                 if ( $possible_newline !~ m:^\s*$: ) {
                     $self->{content} = $possible_newline;    # not a newline
                 }
                 last;
             }
-            $header .= $_;
+            $header .= $line;
         }
-    }
-
-    # skip content if header_only or skip_content is specified
-    if ( $opt{header_only} || $opt{skip_content} ) {
-        delete $self->{content};
     }
 
     # read content
-    else {
+    if ( $what eq 'content' || $what eq 'both' ) {
         $self->{content} = '' unless ( exists $self->{content} );
-        while (<$fh>) {
-            $self->{content} .= $_;
+        while ( my $line = <$fh> ) {
+            $self->{content} .= $line;
         }
     }
+
+    # # delete content because if header has changed, content probably has too
+    # elsif ($what eq 'header' || $what eq 'both') {
+    #     delete $self->{content};
+    # }
+
     $fh->close;
 
     # parse YAML header if it exists and we don't already have metadata
-    if ( $header && !$self->{meta} ) {
-        $self->{meta} = Load($header);
-
-        $self->verify_metadata;
+    if ( $what eq 'header' || $what eq 'both' ) {
+        $self->{meta} = Load($header) if ($header);
+        $self->check_meta;
     }
+
+    #print STDERR Data::Dumper->Dump([$self],[qw(self)]);
 
     return 1;
 }
@@ -186,9 +199,13 @@ Write note to file.
 sub write {
     my $self = shift;
 
+    carp "write: writing '" . $self->file . "'" if ($Notable::DEBUG);
+
     # we must save the content first because the 'content' method might read
     # the file, meaning it would try to read a file being written...
     my $content = $self->content;
+
+    #print STDERR Data::Dumper->Dump( [$content], [qw(content)]) if ($Notable::DEBUG);
 
     # open file
     my $fh = IO::File->new( $self->{path}, "w" ) || die "File open fail";
@@ -198,7 +215,16 @@ sub write {
     print $fh "---\n\n";
     print $fh $content if ($content);
 
+    # if ($Notable::DEBUG) {
+    #     print STDERR Dump( $self->{meta} );
+    #     print STDERR "---\n\n";
+    #     print STDERR $content if ($content);
+    # }
+
     $fh->close;
+
+    # update mtime
+    $self->{mtime} = stat( $self->{path} )->mtime;
 }
 
 =head2 verify_metadata()
@@ -207,8 +233,10 @@ Verify that metadata is valid.
 
 =cut
 
-sub verify_metadata {
+sub check_meta {
     my $self = shift;
+
+    return undef unless ( $self->{meta} );
 
     # if no title is set, set title from file name
     unless ( $self->has('title') ) {
@@ -265,30 +293,43 @@ sub meta {
     my $self = shift;
     my $key  = shift;
 
-    # if metadata is not yet read from file, do it!
-    if ( !$self->{meta} && -f $self->{path} ) {
-        $self->read( header_only => 1 );
-    }
+    # read metadata unless we alread have it
+    $self->read('header') unless ( $self->{meta} );
 
     # if no key is specified, return the entire metadata block
     if ( !$key ) {
         return $self->{meta};
     }
 
-    # if value is specified, set key to this value
-    if (@_) {
-        my $val = shift;
-        $self->{meta}->{$key} = $val;
+    my $retval;
+
+    # a "->" denotes a hierarchial key, like key->subkey
+    if ( $key =~ m/->/ ) {
+        ( $key, my $subkey ) = split m/->/, $key, 2;
+        if (@_) {
+            my $val = shift;
+            $self->{meta}->{$key}->{$subkey} = $val;
+            $self->{mtime} = time;    # modification time stamp
+        }
+        $retval = $self->{meta}->{$key}->{$subkey} if ( $self->{meta}->{$key} );
+    }
+    else {
+        if (@_) {
+            my $val = shift;
+            $self->{meta}->{$key} = $val;
+            $self->{mtime} = time;    # modification time stamp
+        }
+        $retval = $self->{meta}->{$key};
     }
 
     # if the key is an array, return value as array
-    if ( exists $self->{meta}->{$key} && ref $self->{meta}->{$key} eq 'ARRAY' )
-    {    # we shouldn't do this: https://lukasatkinson.de/2017/how-to-check-for-an-array-reference-in-perl/
-        return wantarray ? @{ $self->{meta}->{$key} } : $self->{meta}->{$key};
+    # we shouldn't do this: https://lukasatkinson.de/2017/how-to-check-for-an-array-reference-in-perl/
+    if ( $retval && ref $retval eq 'ARRAY' ) {
+        return wantarray ? @{$retval} : $retval;
     }
 
     # return value of key
-    return $self->{meta}->{$key};
+    return $retval;
 }
 
 =head2 delete_meta( $key )
@@ -303,13 +344,21 @@ sub delete_meta {
 
     return undef unless ($key);
 
-    # if metadata is not yet read from file, do it!
-    if ( !$self->{meta} && -f $self->{path} ) {
-        $self->read( header_only => 1 );
-    }
+    # read metadata unless we alread have it
+    $self->read('header') unless ( $self->{meta} );
 
-    if (defined $self->{meta}->{$key}) {
+    # a "->" denotes a hierarchial key, like key->subkey
+    if ( $key =~ m/->/ ) {
+        ( $key, my $subkey ) = split m/->/, $key, 2;
+        if ( defined $self->{meta}->{$key}->{$subkey} ) {
+            delete $self->{meta}->{$key}->{$subkey};
+            $self->{mtime} = time;    # modification time stamp
+            return 1;
+        }
+    }
+    elsif ( defined $self->{meta}->{$key} ) {
         delete $self->{meta}->{$key};
+        $self->{mtime} = time;        # modification time stamp
         return 1;
     }
 
@@ -325,14 +374,20 @@ Returns true if $key exists in the note metadata.
 sub has {
     my ( $self, $key ) = @_;
 
-    # checking for content is a special case
-    if ( $key eq 'content' ) {
-        if ( !defined $self->{content} && -f $self->{path} ) {
-            $self->read;
-        }
-        return $self->{content} ? 1 : 0;
+    # read metadata unless we alread have it
+    $self->read('header') unless ( $self->{meta} );
+
+    # a "->" denotes a hierarchial key, like key->subkey
+    if ( $key =~ m/->/ ) {
+        ( $key, my $subkey ) = split m/->/, $key, 2;
+
+        #print STDERR "in has(): ", Data::Dumper->Dump([$key, $subkey],[qw(key subkey)]);
+        return $self->{meta}->{$key} && $self->{meta}->{$key}->{$subkey} ? 1 : 0;
     }
-    return $self->{meta}->{$key} ? 1 : 0;
+    else {
+        #print STDERR "in has(): ", Data::Dumper->Dump([$self, $key],[qw(self key)]);
+        return $self->{meta}->{$key} ? 1 : 0;
+    }
 }
 
 =head title( $title )
@@ -384,8 +439,11 @@ sub add_tags {
     foreach my $tag (@_) {
         if ( !grep m/^\Q$tag\E$/, @{ $self->{meta}->{tags} } ) {
             push @{ $self->{meta}->{tags} }, $tag;
+            say "add_tags: add tag '$tag'" if ($Notable::DEBUG);
         }
     }
+    $self->{mtime} = time;    # modification time stamp
+
 }
 
 =head2 remove_tags( @tags )
@@ -396,12 +454,15 @@ Remove tags from note.
 
 sub remove_tags {
     my $self = shift;
-    foreach my $tag (@_) {
-        next unless $tag;
-        @{ $self->{meta}->{tags} } = grep { !m/^\Q$tag\E$/ } @{ $self->{meta}->{tags} };
+    if ( $self->has('tags') ) {
+        foreach my $tag (@_) {
+            next unless $tag;
+            @{ $self->{meta}->{tags} } = grep { !m/^\Q$tag\E$/ } @{ $self->{meta}->{tags} };
+        }
     }
-}
+    $self->{mtime} = time;    # modification time stamp
 
+}
 
 =head2 notebooks()
 
@@ -428,7 +489,6 @@ sub in_notebook {
     my ( $self, $notebook ) = @_;
     my %notebook = map { $_ => 1 } $self->notebooks;
     return $notebook{$notebook};
-
 }
 
 =head2 created( $iso8601_timestamp )
@@ -512,12 +572,13 @@ sub content {
     my $self = shift;
     if (@_) {
         $self->{content} = shift;
-        $self->modified_now;    # update time stamp
+        $self->{mtime}   = time;    # modification time stamp
+
     }
 
     # if content has not yet been read from file, do it
-    elsif ( !$self->{content} && -f $self->{path} ) {
-        $self->read;
+    elsif ( !defined $self->{content} && -f $self->{path} ) {
+        $self->read('content');
     }
 
     return $self->{content};
