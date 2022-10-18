@@ -7,8 +7,27 @@ Notable - access the Notable database.
 =head1 SYNOPSIS
 
     use Notable;
+    my $notable = Notable->new();
 
-    my $notable = Notable->new( $path );
+    # Open a Notable directory.
+    $notable->open_dir( "$ENV{HOME}/.notable" );
+
+    # Select all notes in a specific notebook.
+    my @notes = $notable->select( notebook => "Notebook" );
+
+    # Loop over notes with specific tag and word in title.
+    foreach my $note ($notable->select( tag => "Tag1", title => "A test" ) ) {
+        say $note->title;
+    }
+
+    # Close Notable directory (needed to save cache).
+    $notable->close_dir;
+
+=head1 DESCRIPTION
+
+The C<Notable.pm> module is a Perl interface to a
+L<Notable|https://notable.app> database. It's intended for easy scripting and
+manipulation of Notable notes.
 
 =cut
 
@@ -19,17 +38,20 @@ use open qw(:encoding(UTF-8));
 use Notable::Note;
 use Carp qw(carp);
 use Storable;
-
-#use DateTime::Format::ISO8601;
 use File::stat;
 
-our $DEBUG = 0;
+our $DEBUG = 1;
 
 =head1 FUNCTIONS
 
-=head2 new( [$data_dir] )
+=head2 Selecting a Notable data directory
 
-Create a new instance with C<$data_dir> pointing to the Notable data directory.
+=over
+
+=item C<new( [data_dir] )>
+
+Create a new C<Notable> instance. If C<data_dir> dir is supplied, open_dir is
+automatically called.
 
 =cut
 
@@ -52,38 +74,15 @@ sub new {
     return $self;
 }
 
-# sub DESTROY {
-#     my $self = shift;
-#     say STDERR "DESTROY!!";
-#     $self->save_cache;
-# }
+=item C<open_dir( dir )>
 
-=head2 ok()
+Set Notable data directory to C<dir>. Returns true if a valid Notable data
+directory is found.
 
-Returns true if everything is ok. If not, see C<error()>.
+    $success = $notable->open_dir( "$ENV{HOME}/Notable" );
+    # foo
 
-=cut
-
-sub ok {
-    my $self = shift;
-    return $self->{ok};
-}
-
-=head2 error()
-
-Returns error message if not C<ok()>.
-
-=cut
-
-sub error {
-    my $self = shift;
-    return $self->{error} ? $self->{error} : "";
-}
-
-=head2 open_dir( $dir )
-
-Set Notable data directory. Returns true if this is a valid Notable data
-directory.
+Why isn't this regarded as Perl code?
 
 =cut
 
@@ -97,13 +96,14 @@ sub open_dir {
         $self->{cachefile}       = File::Spec->catfile( $self->{config_dir}, "cache.storable" );
 
     }
+
     if ( -d $self->{base_dir} && -d $self->{notes_dir} ) {
 
         # If I'm going to do caching seriously, I need to diff arrays and stuff. See here:
         # https://stackoverflow.com/questions/2933347/difference-of-two-arrays-using-perl
 
         # Get a list of files with their corresponding mtime
-        $self->stat_files;
+        $self->_stat_files;
         $self->read_cache;
 
         # Determine new and deleted files compared to cache
@@ -141,103 +141,70 @@ sub open_dir {
     return $self->{ok};
 }
 
+
+sub _stat_files {
+    my $self = shift;
+    carp "stat files $self->{notes_dir}" if ($DEBUG);
+    #my $glob = File::Spec->catfile( $self->{notes_dir}, "*" );
+    #print "glob=$glob";
+    #my @files = glob $glob;
+    opendir my $dir, $self->{notes_dir} or die;    # TODO: error handling
+    #my @files = readdir $dir;
+    #print Data::Dumper->Dump( [\@files], [qw(@files)] );
+    %{ $self->{files} } = map { $_ => stat( File::Spec->catfile( $self->{notes_dir}, $_ ) )->mtime } grep {m/\.md$/i} readdir $dir;
+    closedir $dir;
+    #die;
+    return $self->{files};
+}
+
+
+=item close_dir
+
+Close Notable data directory. This is necessary if caching is used.
+
+=cut
+
 sub close_dir {
     my $self = shift;
     $self->save_cache;
 }
 
-sub stat_files {
-    my $self = shift;
-    opendir my $dir, $self->{notes_dir} or die;    # TODO: error handling
-    %{ $self->{files} } = map { $_ => stat( File::Spec->catfile( $self->{notes_dir}, $_ ) )->mtime } grep {m/\.md$/i} readdir $dir;
-    closedir $dir;
-    return $self->{files};
-}
+=back
 
-=head2 open_note( $name )
+=head2 Selecting notes
 
-Get note based on file name. Returns a L<Notable::Note> object on success.
+=over
 
-=cut
+=item C<select( search_parameters )>
 
-sub open_note {
-    my ( $self, $file ) = @_;
+Select notes based on tags, notebooks and/or title. The following parameters
+can be specified:
 
-    if ( !exists $self->{cache}->{$file} ) {
-        carp "open_note( '$file' )" if $DEBUG;
-        $self->{cache}->{$file} = Notable::Note->open( file => $file, dir => $self->{notes_dir} );
-    }
-    return $self->{cache}->{$file};
-}
+=over
 
-=head1 add_note( title => $title )
+=item title => $title
 
-Add a new note to the Notable database.
+Find notes with title matching the regex C<$title>. Example:
 
-=cut
+    @notes = $notable->select( title => "words.*in.*title" );
 
-sub add_note {
-    my $self = shift;
+=item tag => $tag
 
-    # Create new note, just pass on parameters.
-    my $note = Notable::Note->new( dir => $self->{notes_dir}, @_ );
+Find notes matching tag C<$tag>. If C<$tag> is a reference to an array, all
+tags will be matched using the logical B<and> operator. Examples:
 
-    # If that worked, store the newly created note in the cache and return it.
-    if ($note) {
-        $self->{cache}->{ $note->file } = $note;
-        return $note;
-    }
-    return undef;
-}
+    @notes = $notable->select( tag => "Tag" );
+    @notes = $notable->select( tag => [ "Tag1", "Tag2", "Tag3" ] );
 
-# =head2 get_note_title( $title )
-
-# Get note based on title.
-
-# TODO: What about notes with duplicate titles?
-
-# =cut
-
-# sub get_note_title {
-#     my ( $self, $title ) = @_;
-
-#     # build title index if needed
-#     $self->_build_title_index unless ( $self->{titles} );
-
-#     return $self->{titles}->{$title};
-# }
-
-# sub _build_list_of_notebooks {
-#     my $self = shift;
-#     if ( !exists $self->{notebook} ) {
-#         foreach my $file ( @{ $self->{filelist} } ) {
-#             my $note = $self->get_note($file);
-#             foreach my $notebook ( $note->notebooks ) {
-#                 push @{ $self->{notebook}->{$notebook} }, $file;
-#             }
-#         }
-#     }
-# }
-
-# sub _build_title_index {
-#     my $self = shift;
-#     if ( !exists $self->{titles} ) {
-#         foreach my $file ( @{ $self->{filelist} } ) {
-#             my $note = $self->get_note($file);
-#             $self->{titles}->{ $note->title } = $note;    # TODO:-20 check for duplicates
-#         }
-#     }
-# }
-
-=head2 select( $regexp, $tags, $notebooks )
-
-Select notes...
+=back
 
 =cut
 
 sub select {
     my $self   = shift;
     my %search = @_;
+
+    say STDERR "select!";
 
     # begin with a list of all notes
     my $list = $self->select_all();
@@ -270,34 +237,22 @@ sub select {
     return wantarray ? @$list : $list;
 }
 
-=head2 select_all()
+=item C<select_all()>
 
-Return a list of all notes.
+Return an array all active notes as L<Notable::Note> objects, that is, all notes that are neither deleted nor archived.
 
 =cut
 
 sub select_all {
     my $self = shift;
-
-    # if ( !exists $self->{notes} ) {
-    #     $self->{notes} = [];
-    #     @{ $self->{notes} } = grep {$_} map { $self->open_note($_) } @{ $self->{filelist} }; # TODO: this can silently ignore errors
-    # }
-    #print Data::Dumper->Dump( [$self->{notes}], [qw(notes)]);
-    # something goes wrong here and I don't know why
     my $all = [];
-    @$all = grep { !$_->meta('deleted') } map { $self->{cache}->{$_} } sort keys %{ $self->{cache} };
-
-    # foreach my $note (@$all) {
-    #     say STDERR "$note->{file}";
-    # }
-    # say "ABOVE IS FROM select_all() - notes: ", scalar @$all;
+    @$all = grep { $_->active } map { $self->{cache}->{$_} } sort keys %{ $self->{cache} };
     return wantarray ? @$all : $all;
 }
 
-=head2 select_tag( $tag[, $list])
+=item C<select_tag( $tag, $list )>
 
-Select notes with $tag from $list (an arrayref of L<Notable::Note> objects).
+Select notes from C<$list> (an arrayref of L<Notable::Note> objects) that has tag C<$tag>. If C<$list> is omitted, C<select_all()> is used.
 
 =cut
 
@@ -310,9 +265,9 @@ sub select_tag {
     return wantarray ? @$list : $list;
 }
 
-=head2 select_notebook( $notebook[, $list] )
+=item C<select_notebook( $notebook, $list )>
 
-Select notes belonging to $notebook from $list.
+Select notes from C<$list> that belongs to notebook C<$notebook>. If C<$list> is omitted, C<select_all()> is used.
 
 =cut
 
@@ -325,9 +280,9 @@ sub select_notebook {
     return wantarray ? @$list : $list;
 }
 
-=head2 select_title( $regexp[, $list ] )
+=item C<select_title( $regex, $list )>
 
-Selecet notes with $regexp in title.
+Select notes from C<$list> where C<$regex> matches the title. If C<$list> is omitted, C<select_all()> is used.
 
 =cut
 
@@ -341,9 +296,9 @@ sub select_title {
     return wantarray ? @$list : $list;
 }
 
-=head2 select_meta( $key, $value[, $list] )
+=item C<select_meta( $key, $value, $list )>
 
-Select notes with metadata $key set to $regex.
+Select notes from C<$list> where metadata C<$key> matches C<$value>. If C<$list> is omitted, C<select_all()> is used.
 
 =cut
 
@@ -383,7 +338,67 @@ sub select_meta {
     return wantarray ? @$list : $list;
 }
 
-=head2 attachments()
+=item C<select_has( $key, $list )>
+
+Select notes from C<$list> that has existing metadata C<$key>. If C<$list> is omitted, C<select_all()> is used.
+
+=cut
+
+sub select_has {
+    my ( $self, $key, $list ) = @_;
+    $list = $self->select_all() unless ($list);
+    local ($_);
+    @$list = grep { $_->has($key) } @$list;
+    return wantarray ? @$list : $list;
+}
+
+=head2 Opening and adding individual notes
+
+=over
+
+=item open_note( filename )
+
+Get note with specified file name. Returns a L<Notable::Note> object on success.
+
+=cut
+
+sub open_note {
+    my ( $self, $file ) = @_;
+
+    if ( !exists $self->{cache}->{$file} ) {
+        carp "open_note( '$file' )" if $DEBUG;
+        $self->{cache}->{$file} = Notable::Note->open( file => $file, dir => $self->{notes_dir} );
+    }
+    return $self->{cache}->{$file};
+}
+
+=item add_note( title => $title )
+
+Add a new note to the Notable database.
+
+=cut
+
+sub add_note {
+    my $self = shift;
+
+    # Create new note, just pass on parameters.
+    my $note = Notable::Note->new( dir => $self->{notes_dir}, @_ );
+
+    # If that worked, store the newly created note in the cache and return it.
+    if ($note) {
+        $self->{cache}->{ $note->file } = $note;
+        return $note;
+    }
+    return undef;
+}
+
+=back
+
+=head2 Attachments
+
+=over
+
+=item C<attachments>
 
 Return a list of attachments.
 
@@ -402,9 +417,9 @@ sub _fetch_list_of_attachments {
     closedir $dir;
 }
 
-=head1 linked_attachments
+=item C<linked_attachments>
 
-Attachments linked to from a note.
+Return a list of linked attachments, that is, attachments that are actually attached to a note.
 
 =cut
 
@@ -418,6 +433,36 @@ sub linked_attachments {
     return $self->{attachments};
 }
 
+=back
+
+=head2 Caching
+
+C<Notable.pm> use caching with L<Storable>. The cache is saved as
+C<storable.cache> in the C<.notable> subdirectory of the Notable data
+directory.
+
+=over
+
+=item C<read_cache>
+
+Read cache.
+
+=cut
+
+sub read_cache {
+    my $self = shift;
+    carp "cache: read '$self->{cachefile}'" if ($DEBUG);
+    $self->{cache} = retrieve( $self->{cachefile} ) if ( -f $self->{cachefile} );
+}
+
+=item C<save_cache>
+
+Save cache.
+
+=back
+
+=cut
+
 sub save_cache {
     my $self = shift;
 
@@ -429,32 +474,32 @@ sub save_cache {
     store( $self->{cache}, $self->{cachefile} );
 }
 
-sub read_cache {
-    my $self = shift;
-    carp "cache: read '$self->{cachefile}'" if ($DEBUG);
-    $self->{cache} = retrieve( $self->{cachefile} ) if ( -f $self->{cachefile} );
+=back
 
-    # foreach my $note (values %{$self->{cache}}) {
-    #     say STDERR "READ CACHED ", $note->title;
-    # }
+=head2 Error handling
+
+=over
+
+=item ok
+
+Returns true if everything is ok. If not, see C<error>.
+
+=cut
+
+sub ok {
+    my $self = shift;
+    return $self->{ok};
 }
 
-# sub update_metadata {
-#     my $self = shift;
-#     my $fmt  = DateTime::Format::Strptime->new( pattern => '%FT%T%z', on_error => 'croak' );
-#     foreach my $file ( @{ $self->{filelist} } ) {
-#         say STDERR "CHECKING FILE $file";
-#         if ( my $note = $self->{note}->{$file} ) {
-#             $note->verify_metadata;
-#         }
-#     }
-#     die;
-# }
+=item error
 
-sub yamlpp {
+Returns error message if not C<ok()>.
+
+=cut
+
+sub error {
     my $self = shift;
-    $self->{yamlpp} = YAML::PP->new( footer => 1 ) unless ( $self->{yamlpp} );
-    return $self->{yamlpp};
+    return $self->{error} ? $self->{error} : "";
 }
 
 1;

@@ -25,13 +25,32 @@ use File::stat;
 use File::Spec;
 use DateTime;
 
-#use DateTime::Format::ISO8601;
+=head2 Opening and creating notes
 
-=head2 new( title => $title, file => $file, dir => $dir )
+=over
 
-Create a new note. If file is not specified, it is determined from the title,
-and vice versa. dir must be specified, either explicitly or as part of the
-file name.
+=item C<new( parameters )>
+
+Create a new note. Parameters:
+
+=over
+
+=item C<title => $title>
+
+Set title to C<$title>. Title is determined from file name if not specified.
+
+=item C<file => $file>
+
+Set file name to C<$file>. Can be a full path, in which case C<$dir>(below) is
+set. File name is determined from title if not specified.
+
+=item C<dir => $dir>
+
+Set directory to <$dir>. Determined from file name if C<$file> is a full path.
+
+=back
+
+Returns a valid L<Notable::Note> object.
 
 =cut
 
@@ -141,7 +160,7 @@ sub read {
     }
 
     # open file
-    my $fh = IO::File->new( $self->{path}, "r" ) || die "File open fail";
+    my $fh = IO::File->new( $self->{path}, "r" ) || die "Could not open file ($!), do you need to clear the cache?";
     $fh->binmode(":encoding(UTF-8)");
 
     # read header
@@ -502,6 +521,19 @@ sub created {
     return $self->meta( 'created', @_ );
 }
 
+=head2 created_ymd()
+
+Get the created date in YYYY-MM-DD format.
+
+=cut
+
+sub created_ymd {
+    my $self = shift;
+    my $date = $self->created;
+    $date =~ s/T.*//;
+    return $date;
+}
+
 =head2 modified( $iso8601_timestamp )
 
 Get (or set) modification time.
@@ -513,6 +545,19 @@ sub modified {
     return $self->meta( 'modified', @_ );
 }
 
+=head2 modified_ymd()
+
+Get the modified date in YYYY-MM-DD format.
+
+=cut
+
+sub modified_ymd {
+    my $self = shift;
+    my $date = $self->modified;
+    $date =~ s/T.*//;
+    return $date;
+}
+
 =head2 modified_now()
 
 Update the modified metadata with the current time.
@@ -522,6 +567,39 @@ Update the modified metadata with the current time.
 sub modified_now {
     my $self = shift;
     $self->modified( DateTime->now->iso8601 . 'Z' );
+}
+
+=head2 deleted()
+
+Returns true if the note is deleted, false otherwise.
+
+=cut
+
+sub deleted {
+    my $self = shift;
+    return $self->has('deleted') && $self->meta('deleted');
+}
+
+=head2 archived()
+
+Returns true if the note is archived, false otherwise.
+
+=cut
+
+sub archived {
+    my $self = shift;
+    return $self->has('archived') && $self->meta('archived');
+}
+
+=head active()
+
+Returns true if the note is neither archived nor deleted.
+
+=cut
+
+sub active {
+    my $self = shift;
+    return !$self->archived && !$self->deleted;
 }
 
 sub file {
@@ -570,10 +648,17 @@ Get or set the content. This should be valid markdown.
 
 sub content {
     my $self = shift;
+    # print STDERR Data::Dumper->Dump( [$self], [qw(self)]);
+    # carp "that's self";
+    # if (-f $self->{path}) {
+    #     say STDERR "FILE EXISTS: $self->{path}";
+    # }
+    # else {
+    #     say STDERR "FILE DOESN'T EXIST: $self->{path}";
+    # }
     if (@_) {
         $self->{content} = shift;
         $self->{mtime}   = time;    # modification time stamp
-
     }
 
     # if content has not yet been read from file, do it

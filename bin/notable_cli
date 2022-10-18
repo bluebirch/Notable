@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
-use strict;
-use warnings;
+use Modern::Perl;
+use utf8;
 use open qw(:encoding(UTF-8) :std);
 use locale;
 use Encode qw(decode_utf8);
@@ -9,7 +9,7 @@ use Config::Tiny;
 use Getopt::Long;
 use Notable;
 use Text::ASCIITable;
-use YAML;
+#use YAML::PP;
 use Data::Dumper;
 
 # Usage
@@ -31,7 +31,7 @@ foreach my $ConfigFile ( $ENV{HOME} . '/.config/notable_cli/config', $ENV{HOME} 
 # Notable data directory, defaults to $HOME/.notable.
 my $DataDir = $Config->{_}->{datadir} ? $Config->{_}->{datadir} : $ENV{HOME} . '/.notable';
 
-# Make sure command line is interpreted as UTF-8
+# Make sure command line is interpreted as UTF-8. Will break things on Windows.
 @ARGV = map { decode_utf8( $_, 1 ) } @ARGV;
 
 # Parse command line
@@ -41,35 +41,47 @@ my $Verbose;
 my $Debug;
 my $MaxTitleWidth = 50;
 my $PandocOptions = $Config->{pandoc}->{options} ? $Config->{pandoc}->{options} : '--pdf-engine=xelatex';
+my $Destination;
 
 GetOptions(
-    "datadir=s"  => \$DataDir,
+    "dir=s"      => \$DataDir,
     "notebook=s" => \@Notebooks,
     "tag=s"      => \@Tags,
     "verbose"    => \$Verbose,
-    "debug"      => \$Debug
+    "debug"      => \$Debug,
+    "destination=s" => \$Destination
 ) or usage(2);
 
 # Expand ~ in $DataDir and $PandocOptions
 $DataDir       =~ s/~/$ENV{HOME}/ge;
 $PandocOptions =~ s/~/$ENV{HOME}/ge;
 
+# Debugging things
+if ($Debug) {
+    $Verbose = $Notable::DEBUG = 1;
+}
+
 # create Notable object
 my $notable = Notable->new($DataDir);
 
 # check that everything is ok
 unless ( $notable->ok ) {
-    print STDERR "Error: ", $notable->error, "\n";
+    say STDERR "Error: ", $notable->error;
     exit 255;
 }
 
+# What's left on the command line now should be a command
 my $Command = shift @ARGV;
 
+# Quit if it isn't
 unless ($Command) {
     usage(2);
 }
 
+# ls or list
 if ( $Command =~ m/^(?:ls|list)/ ) {
+
+    say "ls" if ($Debug);
 
     # use rest of command line as search string
     my $TitleRegex = join( " ", @ARGV );
@@ -88,10 +100,36 @@ if ( $Command =~ m/^(?:ls|list)/ ) {
     }
     $t->setColWidth( 'Title', $MaxTitleWidth );
     foreach my $note (@notes) {
-        $t->addRow( $note->title, join( ', ', $note->notebooks ), $note->created->ymd, $note->modified->ymd );
+        $t->addRow( $note->title, join( ', ', $note->notebooks ), $note->created_ymd, $note->modified_ymd );
     }
     print $t;
 }
+
+# Copy notes to other Notable directory
+elsif ( $Command =~ m/^(?:copy)/ ) {
+
+    if (!$Destination) {
+        say STDERR "copy requires `--destination`";
+        exit 255;
+    }
+    elsif (! -d $Destination) {
+        say STDERR "$Destination must be a directory";
+        exit 255;
+    }
+
+    # Create destination thing
+    my $dest_notable = Notable->new( $Destination );
+
+    if (!$dest_notable) {
+        say STDERR "$Destination must be a valid Notable directory";
+        exit 255;
+    }
+
+    my $TitleRegex = join( " ", @ARGV );
+    my @notes      = $notable->select( title => $TitleRegex, tag => \@Tags, notebook => \@Notebooks );
+
+}
+
 elsif ( $Command =~ m/^(?:links)/ ) {
     my $TitleRegex = join( " ", @ARGV );
     my @notes      = $notable->select( title => $TitleRegex, tag => \@Tags, notebook => \@Notebooks );
@@ -169,3 +207,6 @@ else {
     print "Unknown command $Command.\n";
     usage(2);
 }
+
+# Close data directory
+$notable->close_dir();
